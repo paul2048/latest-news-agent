@@ -27,16 +27,18 @@ exa = Exa(api_key=os.getenv("EXA_API_KEY"))
 
 SYSTEM_PROMPT = """
 You are a helpful assistant that provides news updates based on user preferences.
-You need to collect the following user preferences by asking to provide their preferred:
+You need to collect the following user preferences by asking to provide their preferences one at a time:
     1. tone of voice (e.g., formal, casual, enthusiastic)
     2. response format (e.g., bullet points, paragraphs)
     3. language
     4. interaction style (e.g., concise, detailed)?
     5. news topics (e.g., politics, technology, sports)
-once at a time (e.g. start with "What is your preferred tone of voice? (e.g., formal, casual, enthusiastic)")
+(e.g. start with "What is your preferred tone of voice? (e.g., formal, casual, enthusiastic)")
     
-Once all preferences are collected, the user can start asking specific news questions.
-After each of these questions, execute the fetch_news function.
+Once all preferences are collected, the user can ask for news. When they do:
+1.  First, you MUST call the `fetch_news` function with an appropriate query to get the raw news articles.
+2.  Second, you MUST take the text returned by `fetch_news` and pass it directly to the `summarize_news` function.
+3.  Finally, present the summary from `summarize_news` to the user, adhering to their collected preferences.
 """
 MODEL = "gpt-4o-mini"
 DEFAULT_MESSAGES = [
@@ -53,34 +55,73 @@ def fetch_news(query: str):
         results_str = ""
         for result in search_response.results:
             results_str += f"URL: {result.url}\nTitle: {result.title}\n\n{result.text}\n\n---\n\n"
+        print(f"--- Fetched articles: {results_str} ---")
         return results_str
     except Exception as e:
         print(f"Error fetching news: {e}")
         return f"An error occurred while fetching the news: {str(e)}"
+
+def summarize_news(articles_text: str):
+    """
+    Summarizes a given block of text containing news articles using the OpenAI API.
+    """
+    print("--- Summarizing news... ---")
+    try:
+        # We create a new, separate call to the model just for summarization
+        summary_completion = client.chat.completions.create(
+            model="gpt-4o-mini", # You can use a specific model for this task
+            messages=[
+                {"role": "system", "content": "You are a summarization expert. Summarize the following news articles into a concise paragraph."},
+                {"role": "user", "content": articles_text}
+            ]
+        )
+        summary = summary_completion.choices[0].message.content
+        print(f"--- Summary generated: {summary} ---")
+        return summary
+    except Exception as e:
+        print(f"Error summarizing news: {e}")
+        return f"An error occurred during summarization: {str(e)}"
 
 tools = [
     {
         "type": "function",
         "function": {
             "name": "fetch_news",
-            "description": "Fetches news articles based on a specific topic or query. Use this for any news-related request.",
+            "description": "Fetches raw news articles based on a specific topic or query. This is the first step.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The news topic to search for, e.g., 'latest AI developments' or 'US election updates'.",
+                        "description": "The news topic to search for, e.g., 'latest AI developments'.",
                     },
                 },
                 "required": ["query"],
             },
         },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "summarize_news",
+            "description": "Summarizes a long string of text containing news articles. This is the second step, after fetching.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "articles_text": {
+                        "type": "string",
+                        "description": "The combined text of the news articles to be summarized.",
+                    },
+                },
+                "required": ["articles_text"],
+            },
+        },
     }
 ]
 
-# ### This is the actual function we defined earlier
 available_functions = {
     "fetch_news": fetch_news,
+    "summarize_news": summarize_news,
 }
 
 messages = DEFAULT_MESSAGES.copy()
@@ -113,19 +154,18 @@ async def get_history():
     """Returns the current state of the global chat history."""
     return chat_history
 
-# Clear chat history endpoint
+
 @app.post("/chat/clear")
 async def clear_history():
     """Clears the global chat history."""
-    global chat_history, messages, completion
-    messages = DEFAULT_MESSAGES
-    completion = openai.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-    )
+    global chat_history, messages
+    messages = DEFAULT_MESSAGES.copy()
+    completion = client.chat.completions.create(model=MODEL, messages=messages)
+    initial_agent_message = completion.choices[0].message
+    messages.append(initial_agent_message)
     chat_history.clear()
     chat_history.append(
-        ChatMessage(author="agent", message=completion.choices[0].message.content)
+        ChatMessage(author="agent", message=initial_agent_message.content)
     )
     return {"message": "Chat history cleared."}
 
@@ -138,16 +178,18 @@ async def chat(request: UserInput):
     messages.append({"role": "user", "content": user_input})
     chat_history.append(ChatMessage(author="user", message=user_input))
 
-    completion = client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        tools=tools,
-        tool_choice="auto",
-    )
-    response_message = completion.choices[0].message
+    while True:
+        completion = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+        )
+        response_message = completion.choices[0].message
 
-    # Check if the LLM wants to call a function
-    if response_message.tool_calls:
+        if not response_message.tool_calls:
+            break
+
         messages.append(response_message)
 
         # Execute the function(s)
@@ -156,11 +198,8 @@ async def chat(request: UserInput):
             function_to_call = available_functions[function_name]
             function_args = json.loads(tool_call.function.arguments)
 
-            function_response = function_to_call(
-                query=function_args.get("query")
-            )
+            function_response = function_to_call(**function_args)
 
-            # Send the function's result back to the model
             messages.append(
                 {
                     "tool_call_id": tool_call.id,
@@ -169,15 +208,9 @@ async def chat(request: UserInput):
                     "content": function_response,
                 }
             )
-
-        final_completion = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-        )
-        agent_response_text = final_completion.choices[0].message.content
-    else:
-        agent_response_text = response_message.content
-
+    
+    # Once the loop is broken, the last message content is the final response
+    agent_response_text = response_message.content
     messages.append({"role": "assistant", "content": agent_response_text})
     chat_history.append(ChatMessage(author="agent", message=agent_response_text))
 
