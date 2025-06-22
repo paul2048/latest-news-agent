@@ -45,6 +45,7 @@ DEFAULT_MESSAGES = [
     {"role": "system", "content": SYSTEM_PROMPT},
 ]
 
+
 def fetch_news(query: str):
     """
     Uses the Exa API to search for news and returns the results as a string.
@@ -54,12 +55,15 @@ def fetch_news(query: str):
         search_response = exa.search_and_contents(query, text=True)
         results_str = ""
         for result in search_response.results:
-            results_str += f"URL: {result.url}\nTitle: {result.title}\n\n{result.text}\n\n---\n\n"
+            results_str += (
+                f"URL: {result.url}\nTitle: {result.title}\n\n{result.text}\n\n---\n\n"
+            )
         print(f"--- Fetched articles: {results_str} ---")
         return results_str
     except Exception as e:
         print(f"Error fetching news: {e}")
         return f"An error occurred while fetching the news: {str(e)}"
+
 
 def summarize_news(articles_text: str):
     """
@@ -67,13 +71,15 @@ def summarize_news(articles_text: str):
     """
     print("--- Summarizing news... ---")
     try:
-        # We create a new, separate call to the model just for summarization
         summary_completion = client.chat.completions.create(
-            model="gpt-4o-mini", # You can use a specific model for this task
+            model=MODEL,
             messages=[
-                {"role": "system", "content": "You are a summarization expert. Summarize the following news articles into a concise paragraph."},
-                {"role": "user", "content": articles_text}
-            ]
+                {
+                    "role": "system",
+                    "content": "You are a summarization expert. Summarize the following news articles into a concise paragraph.",
+                },
+                {"role": "user", "content": articles_text},
+            ],
         )
         summary = summary_completion.choices[0].message.content
         print(f"--- Summary generated: {summary} ---")
@@ -81,6 +87,7 @@ def summarize_news(articles_text: str):
     except Exception as e:
         print(f"Error summarizing news: {e}")
         return f"An error occurred during summarization: {str(e)}"
+
 
 tools = [
     {
@@ -116,7 +123,7 @@ tools = [
                 "required": ["articles_text"],
             },
         },
-    }
+    },
 ]
 
 available_functions = {
@@ -208,7 +215,7 @@ async def chat(request: UserInput):
                     "content": function_response,
                 }
             )
-    
+
     # Once the loop is broken, the last message content is the final response
     agent_response_text = response_message.content
     messages.append({"role": "assistant", "content": agent_response_text})
