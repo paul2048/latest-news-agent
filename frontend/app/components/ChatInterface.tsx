@@ -66,8 +66,27 @@ export default function ChatInterface() {
           <div ref={listEndRef} />
         </ul>
       </div>
-      <div className="bg-gray-800 flex-none justify-center items-center">
+      <div className="flex bg-gray-800 flex-none justify-center items-center">
         <ChatForm action={handleFormSubmit} isPending={isPending} />
+
+        <button
+          type="button"
+          className="flex-none ml-2 bg-red-400 hover:bg-red-700 text-black font-bold py-2 px-4 rounded m-2"
+          onClick={() => {
+            fetch("http://localhost:8000/chat/clear", { method: "POST" })
+              .then((response) => response.json())
+              .then(() => {
+                setHistory([
+                  {
+                    author: "agent", 
+                    message: "First, what's your preferred tone of voice (e.g., formal, casual, enthusiastic)?"
+                  }
+                ]);
+              })
+              .catch((error) => console.error("Error clearing chat history:", error));
+          }}>
+            Clear history
+          </button>
       </div>
     </main>
   );
