@@ -1,12 +1,12 @@
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 from typing import List, Literal
-from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import openai
 from exa_py import Exa
 from dotenv import load_dotenv
+import json
 
 
 class ChatMessage(BaseModel):
@@ -20,48 +20,85 @@ class UserInput(BaseModel):
 
 chat_history: List[ChatMessage] = []
 
-
-PREFERENCES_QUESTIONS = [
-    "First, what's your preferred tone of voice (e.g., formal, casual, enthusiastic)?",
-    "Got it. What's your preferred response format (e.g., bullet points, paragraphs)?",
-    "Okay. What's your language preference?",
-    "Next, what's your interaction style (e.g., concise, detailed)?",
-    "Almost done! What are your preferred news topics?",
-    "Thank you! I have all your preferences. What news can I get for you?",
-]
-
-NEWS_REQUEST_PROMPT = """
-You are a helpful assistant that provides news updates based on user preferences.
-The user has the following preferences:
-  - preferred tone of voice: {tone_of_voice}
-  - preferred response format: {response_format}
-  - language preference: {language_preference}
-  - interaction style: {interaction_style}
-  - preferred news topics: {news_topics}
-"""
-
 load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 exa = Exa(api_key=os.getenv("EXA_API_KEY"))
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("Server starting up. Initializing chat history...")
-    chat_history.clear()
-    chat_history.append(
-        ChatMessage(author="agent", message=PREFERENCES_QUESTIONS[0])
-    )
-    yield
-    print("Server shutting down.")
+SYSTEM_PROMPT = """
+You are a helpful assistant that provides news updates based on user preferences.
+You need to collect the following user preferences by asking to provide their preferred:
+    1. tone of voice (e.g., formal, casual, enthusiastic)
+    2. response format (e.g., bullet points, paragraphs)
+    3. language
+    4. interaction style (e.g., concise, detailed)?
+    5. news topics (e.g., politics, technology, sports)
+once at a time (e.g. start with "What is your preferred tone of voice? (e.g., formal, casual, enthusiastic)")
+    
+Once all preferences are collected, the user can start asking specific news questions.
+After each of these questions, execute the fetch_news function.
+"""
+MODEL = "gpt-4o-mini"
+DEFAULT_MESSAGES = [
+    {"role": "system", "content": SYSTEM_PROMPT},
+]
 
-app = FastAPI(lifespan=lifespan)
+def fetch_news(query: str):
+    """
+    Uses the Exa API to search for news and returns the results as a string.
+    """
+    print(f"--- Fetching news for query: {query} ---")
+    try:
+        search_response = exa.search_and_contents(query, text=True)
+        results_str = ""
+        for result in search_response.results:
+            results_str += f"URL: {result.url}\nTitle: {result.title}\n\n{result.text}\n\n---\n\n"
+        return results_str
+    except Exception as e:
+        print(f"Error fetching news: {e}")
+        return f"An error occurred while fetching the news: {str(e)}"
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_news",
+            "description": "Fetches news articles based on a specific topic or query. Use this for any news-related request.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The news topic to search for, e.g., 'latest AI developments' or 'US election updates'.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    }
+]
+
+# ### This is the actual function we defined earlier
+available_functions = {
+    "fetch_news": fetch_news,
+}
+
+messages = DEFAULT_MESSAGES.copy()
+initial_completion = client.chat.completions.create(
+    model=MODEL,
+    messages=messages,
+)
+initial_response = initial_completion.choices[0].message
+messages.append(initial_response)
+chat_history.append(ChatMessage(author="agent", message=initial_response.content))
+
+
+app = FastAPI()
 
 
 origins = [
     "http://localhost:3000",
 ]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -80,9 +117,15 @@ async def get_history():
 @app.post("/chat/clear")
 async def clear_history():
     """Clears the global chat history."""
+    global chat_history, messages, completion
+    messages = DEFAULT_MESSAGES
+    completion = openai.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+    )
     chat_history.clear()
     chat_history.append(
-        ChatMessage(author="agent", message=PREFERENCES_QUESTIONS[0])
+        ChatMessage(author="agent", message=completion.choices[0].message.content)
     )
     return {"message": "Chat history cleared."}
 
@@ -90,36 +133,52 @@ async def clear_history():
 @app.post("/chat", response_model=List[ChatMessage])
 async def chat(request: UserInput):
     """Appends a user message and an agent response to the global history."""
+    global chat_history, messages
     user_input = request.userInput
-
+    messages.append({"role": "user", "content": user_input})
     chat_history.append(ChatMessage(author="user", message=user_input))
 
-    # Determine agent's response (either a preference question or a response from the API request)
-    num_user_responses = sum(1 for msg in chat_history if msg.author == "user")
-    agent_response_text = ""
-    if num_user_responses < len(PREFERENCES_QUESTIONS):
-        agent_response_text = PREFERENCES_QUESTIONS[num_user_responses]
-    else:
-        # Fetch the news
-        search_response = exa.search_and_contents(user_input)
+    completion = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        tools=tools,
+        tool_choice="auto",
+    )
+    response_message = completion.choices[0].message
 
-        user_preferences = {
-            "tone_of_voice": chat_history[1].message,
-            "response_format": chat_history[3].message,
-            "language_preference": chat_history[5].message,
-            "interaction_style": chat_history[7].message,
-            "news_topics": chat_history[9].message,
-        }
-        # Summarize the news
-        completion = openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": NEWS_REQUEST_PROMPT.format(**user_preferences)},
-                {"role": "user", "content": "\n\n".join([article.text for article in search_response.results])},
-            ],
+    # Check if the LLM wants to call a function
+    if response_message.tool_calls:
+        messages.append(response_message)
+
+        # Execute the function(s)
+        for tool_call in response_message.tool_calls:
+            function_name = tool_call.function.name
+            function_to_call = available_functions[function_name]
+            function_args = json.loads(tool_call.function.arguments)
+
+            function_response = function_to_call(
+                query=function_args.get("query")
+            )
+
+            # Send the function's result back to the model
+            messages.append(
+                {
+                    "tool_call_id": tool_call.id,
+                    "role": "tool",
+                    "name": function_name,
+                    "content": function_response,
+                }
+            )
+
+        final_completion = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
         )
-        agent_response_text = completion.choices[0].message.content
+        agent_response_text = final_completion.choices[0].message.content
+    else:
+        agent_response_text = response_message.content
 
+    messages.append({"role": "assistant", "content": agent_response_text})
     chat_history.append(ChatMessage(author="agent", message=agent_response_text))
 
     return chat_history
