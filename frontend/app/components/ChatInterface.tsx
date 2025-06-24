@@ -4,6 +4,11 @@ import { useState, useEffect, useRef, useTransition } from "react";
 import { sendUserInput } from "../actions/chat";
 import type { ChatMessage } from "../actions/chat";
 import ChatForm from "./ChatForm";
+import parse from 'html-react-parser';
+import markdownit from 'markdown-it'
+
+
+const md = markdownit()
 
 export default function ChatInterface() {
   const listEndRef = useRef<HTMLDivElement>(null);
@@ -59,7 +64,7 @@ export default function ChatInterface() {
                 item.author === 'user' ? 'bg-blue-900/50 ml-auto' : 'bg-gray-800 mr-auto'
               }`}
             >
-              {item.message}
+              {parse(md.render(item.message))}
             </li>
           ))}
           {error && <li className="text-red-500 text-center">{error}</li>}
