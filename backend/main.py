@@ -34,7 +34,7 @@ You need to collect the following user preferences by asking to provide their pr
     4. interaction style (e.g., concise, detailed)?
     5. news topics (e.g., politics, technology, sports)
 (e.g. start with "What is your preferred tone of voice? (e.g., formal, casual, enthusiastic)")
-    
+
 Once all preferences are collected, the user can ask for news. When they do:
 1.  First, you MUST call the `fetch_news` function with an appropriate query to get the raw news articles.
 2.  Second, you MUST take the text returned by `fetch_news` and pass it directly to the `summarize_news` function.
@@ -69,7 +69,7 @@ def summarize_news(articles_text: str):
     """
     Summarizes a given block of text containing news articles using the OpenAI API.
     """
-    print("--- Summarizing news... ---")
+    print("--- Summarizing news {articles_text} ---")
     try:
         summary_completion = client.chat.completions.create(
             model=MODEL,
